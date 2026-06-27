@@ -6,7 +6,10 @@
 module DocumentTextExtractor
   module_function
 
-  MAX_CHARS = 4_000
+  # Excerpt length fed to the LLM. Kept small on purpose: a local model spends
+  # most of its time on prompt processing, so a 4k-char excerpt makes naming a
+  # PDF time out. ~1.5k chars (header / first page) is plenty to name a document.
+  MAX_CHARS = 1_500
 
   PLAIN_EXTENSIONS = %w[.txt .md .markdown .csv .tsv .json .xml .html .htm .log .rtf .yml .yaml].freeze
   IMAGE_EXTENSIONS = %w[.png .jpg .jpeg .webp .gif .bmp .heic .heif .tiff].freeze
