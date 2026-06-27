@@ -32,14 +32,18 @@ class DocumentRenamer
     # The filename may carry odd bytes (ASCII-8BIT); scrub it to UTF-8 so it can
     # be safely interpolated into the prompt.
     base = File.basename(original_name, ".*").dup.force_encoding("UTF-8").scrub("")
+    is_image = DocumentTextExtractor.image?(original_name) && file_path
 
-    data =
-      if DocumentTextExtractor.image?(original_name) && file_path
-        ask_about_image(base, file_path)
-      else
-        ask_about_text(base, text)
-      end
+    # No extractable text and not an image: there's nothing for the model to name.
+    # Skip the LLM call entirely — feeding it an empty document makes a small
+    # local model stall (it loops on whitespace under the JSON grammar).
+    if !is_image && text.blank?
+      return Result.new(name: sanitize(base).presence || "document",
+                        status: "unreadable",
+                        message: "Aucun contenu textuel extractible.")
+    end
 
+    data = is_image ? ask_about_image(base, file_path) : ask_about_text(base, text)
     build_result(data, base)
   end
 
@@ -80,11 +84,31 @@ class DocumentRenamer
     { "status" => "unreadable", "message" => "Analyse de l'image impossible : #{e.message}" }
   end
 
-  CONNECTION_ERRORS = [Faraday::ConnectionFailed, Errno::ECONNREFUSED, Errno::ECONNRESET].freeze
+  # Network-level failures that mean "the local LLM didn't answer": connection
+  # refused/reset (server down) and read timeouts (generation too slow). All are
+  # surfaced as LlmUnavailable rather than crashing the request with a 500.
+  CONNECTION_ERRORS = [
+    Faraday::ConnectionFailed,
+    Faraday::TimeoutError,
+    Errno::ECONNREFUSED,
+    Errno::ECONNRESET
+  ].freeze
+
+  # A filename JSON is tiny; cap the output so a degenerate generation is cut off
+  # in seconds instead of running until the request times out.
+  MAX_OUTPUT_TOKENS = 150
+
+  # llama.cpp repetition penalty (LM Studio). Without it, small models loop on
+  # whitespace under the JSON grammar and never close the object (the JSON comes
+  # back truncated/unparseable). 1.3 reliably forces them to finish the JSON.
+  # NB: OpenAI's frequency_penalty/presence_penalty did NOT fix this; only the
+  # native repeat_penalty does.
+  REPEAT_PENALTY = 1.3
 
   def chat
     chat = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
     chat.with_temperature(0.2)
+    chat.with_params(max_tokens: MAX_OUTPUT_TOKENS, repeat_penalty: REPEAT_PENALTY)
     chat.with_instructions(SYSTEM_PROMPT)
     chat
   end
@@ -125,6 +149,9 @@ class DocumentRenamer
   # (ASCII, snake_case, length) — no more heuristic parsing of free-form text.
   def sanitize(name)
     name = name.to_s.strip
+    # The model often appends an extension despite instructions (e.g. "..._md");
+    # drop a trailing dot-extension before normalizing so it doesn't leak in.
+    name = name.sub(/\.[a-zA-Z][a-zA-Z0-9]{0,4}\z/, "")
     name = name.unicode_normalize(:nfkd).encode("ASCII", replace: "").encode("UTF-8")
     name = name.downcase.gsub(/[^a-z0-9]+/, "_").gsub(/_+/, "_").gsub(/\A_|_\z/, "")
     name[0, MAX_NAME_LENGTH].to_s.sub(/_\z/, "")

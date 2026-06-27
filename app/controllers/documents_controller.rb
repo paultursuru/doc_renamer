@@ -49,7 +49,7 @@ class DocumentsController < ApplicationController
     save_manifest
     render json: { results: results }
   rescue DocumentRenamer::LlmUnavailable => e
-    render json: { error: "LM Studio est injoignable. Lance le serveur dans LM Studio (onglet Developer) puis réessaie.", detail: e.message },
+    render json: { error: "LM Studio n'a pas répondu (serveur arrêté ou génération trop lente). Vérifie qu'il tourne (onglet Developer) puis réessaie.", detail: e.message },
            status: :service_unavailable
   end
 
