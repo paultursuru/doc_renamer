@@ -33,11 +33,17 @@ class DocumentsController < ApplicationController
       File.binwrite(stored, upload.read)
 
       text = DocumentTextExtractor.extract(path: stored.to_s, original_name: original)
-      base = renamer.propose_name(original_name: original, text: text, file_path: stored.to_s)
-      proposed = "#{base}#{ext}"
+      result = renamer.propose_name(original_name: original, text: text, file_path: stored.to_s)
+      proposed = "#{result.name}#{ext}"
 
-      manifest[id] = { "original" => original, "ext" => ext, "proposed" => proposed }
-      results << { id: id, original: original, proposed: proposed }
+      manifest[id] = {
+        "original" => original, "ext" => ext, "proposed" => proposed,
+        "status" => result.status, "message" => result.message
+      }
+      results << {
+        id: id, original: original, proposed: proposed,
+        status: result.status, message: result.message
+      }
     end
 
     save_manifest
