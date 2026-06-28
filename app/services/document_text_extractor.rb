@@ -11,7 +11,7 @@ module DocumentTextExtractor
   # PDF time out. ~1.5k chars (header / first page) is plenty to name a document.
   MAX_CHARS = 1_500
 
-  PLAIN_EXTENSIONS = %w[.txt .md .markdown .csv .tsv .json .xml .html .htm .log .rtf .yml .yaml].freeze
+  PLAIN_EXTENSIONS = %w[.txt .md .markdown .csv .tsv .json .xml .html .htm .log .yml .yaml].freeze
   IMAGE_EXTENSIONS = %w[.png .jpg .jpeg .webp .gif .bmp .heic .heif .tiff].freeze
 
   def image?(name)
@@ -27,6 +27,9 @@ module DocumentTextExtractor
       case ext
       when ".pdf"            then from_pdf(path)
       when ".docx"           then from_docx(path)
+      when ".xlsx"           then from_xlsx(path)
+      when ".xls"            then from_xls(path)
+      when ".doc", ".rtf"    then from_textutil(path)
       when *PLAIN_EXTENSIONS then from_text(path)
       else from_unknown(path) # best effort, but never on binary
       end
@@ -57,6 +60,51 @@ module DocumentTextExtractor
     return nil unless xml
 
     xml.gsub(%r{</w:p>}, "\n").gsub(/<[^>]+>/, " ")
+  end
+
+  # A .xlsx is also a zip. The cell text lives in xl/sharedStrings.xml (the
+  # string table) and as inline values in the worksheets. We only pull the
+  # contents of <t> (text) and <v> (value) elements to skip the XML noise.
+  def from_xlsx(path)
+    require "zip"
+    parts = []
+    Zip::File.open(path) do |zip|
+      shared = zip.find_entry("xl/sharedStrings.xml")
+      parts << shared.get_input_stream.read if shared
+      zip.glob("xl/worksheets/*.xml").each { |sheet| parts << sheet.get_input_stream.read }
+    end
+    return nil if parts.empty?
+
+    parts.join(" ").scan(%r{<(?:t|v)[^>]*>(.*?)</(?:t|v)>}m).flatten.join(" ")
+  end
+
+  # Legacy binary Excel (.xls / BIFF). Read each cell, row by row, until we have
+  # enough for a name. Spreadsheet detects the format from the content, so the
+  # extension-less stored file is fine.
+  def from_xls(path)
+    require "spreadsheet"
+    Spreadsheet.client_encoding = "UTF-8"
+    out = +""
+    Spreadsheet.open(path).worksheets.each do |sheet|
+      sheet.each do |row|
+        out << row.to_a.compact.join(" ") << "\n"
+        break if out.length >= MAX_CHARS
+      end
+      break if out.length >= MAX_CHARS
+    end
+    out
+  end
+
+  # Legacy Word (.doc, OLE binary) and .rtf. macOS `textutil` converts both to
+  # plain text and sniffs the format from the content (works without a file
+  # extension). On a non-macOS host the command is missing and this returns nil
+  # (→ the file falls back to "unreadable"), which is fine for a local tool.
+  def from_textutil(path)
+    require "open3"
+    out, status = Open3.capture2("textutil", "-convert", "txt", "-stdout", path)
+    status.success? ? out : nil
+  rescue Errno::ENOENT
+    nil
   end
 
   def from_text(path)

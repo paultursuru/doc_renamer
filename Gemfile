@@ -48,3 +48,5 @@ gem "ruby_llm"
 # Text extraction from PDF / DOCX
 gem "pdf-reader"
 gem "rubyzip", require: "zip"
+# Text extraction from legacy Excel (.xls / BIFF, binary)
+gem "spreadsheet"
