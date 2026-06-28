@@ -34,20 +34,42 @@ class DocumentRenamer
     base = File.basename(original_name, ".*").dup.force_encoding("UTF-8").scrub("")
     is_image = DocumentTextExtractor.image?(original_name) && file_path
 
-    # No extractable text and not an image: there's nothing for the model to name.
-    # Skip the LLM call entirely — feeding it an empty document makes a small
-    # local model stall (it loops on whitespace under the JSON grammar).
-    if !is_image && text.blank?
-      return Result.new(name: sanitize(base).presence || "document",
-                        status: "unreadable",
-                        message: "Aucun contenu textuel extractible.")
+    return build_result(ask_about_image(base, file_path), base) if is_image
+    return build_result(ask_about_text(base, text), base) if text.present?
+
+    # No extractable text. A scanned / image-only PDF has no text layer but is
+    # still readable visually: rasterize its first page and let the vision model
+    # look at it (acts as OCR) instead of giving up.
+    if pdf?(original_name) && file_path && (result = name_from_pdf_image(base, file_path))
+      return result
     end
 
-    data = is_image ? ask_about_image(base, file_path) : ask_about_text(base, text)
-    build_result(data, base)
+    # Truly nothing to name: skip the LLM (feeding it an empty document makes a
+    # small local model stall) and report it explicitly.
+    Result.new(name: sanitize(base).presence || "document",
+               status: "unreadable",
+               message: "Aucun contenu textuel extractible.")
   end
 
   private
+
+  def pdf?(name)
+    File.extname(name.to_s).downcase == ".pdf"
+  end
+
+  # Rasterize the PDF's first page and name it through the vision path. Returns a
+  # Result, or nil if the page couldn't be rendered (so the caller falls back to
+  # "unreadable"). The temporary image is always cleaned up.
+  def name_from_pdf_image(base, pdf_path)
+    image_path = PdfRasterizer.first_page_png(pdf_path)
+    return nil unless image_path
+
+    begin
+      build_result(ask_about_image(base, image_path), base)
+    ensure
+      File.delete(image_path) if File.exist?(image_path)
+    end
+  end
 
   def ask_about_text(base, text)
     excerpt = text.presence || "(contenu non extractible)"
