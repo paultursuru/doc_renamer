@@ -1,12 +1,13 @@
 <% content_for :title, "Renommeur de documents (local)" %>
 
-<main class="wrap">
+<main class="wrap" data-controller="renamer">
   <header class="head">
     <h1>📄 Renommeur de documents</h1>
     <p class="sub">100&nbsp;% local — vos fichiers ne quittent jamais votre machine.</p>
-    <div id="status" class="status <%= @online ? 'ok' : 'ko' %>">
+    <div id="status" class="status <%= @online ? 'ok' : 'ko' %>"
+         data-controller="lm-status">
       <span class="dot"></span>
-      <span class="label">
+      <span class="label" data-lm-status-target="label">
         <% if @online %>
           LM&nbsp;Studio connecté — modèle&nbsp;: <code><%= @model %></code>
         <% else %>
@@ -16,8 +17,14 @@
     </div>
   </header>
 
-  <div id="dropzone" class="dropzone" tabindex="0">
-    <input id="fileInput" type="file" multiple hidden>
+  <div class="dropzone" tabindex="0"
+       data-renamer-target="dropzone"
+       data-action="click->renamer#openPicker keydown->renamer#pickerKeydown
+                    dragenter->renamer#dragOver dragover->renamer#dragOver
+                    dragleave->renamer#dragLeave drop->renamer#drop">
+    <input type="file" multiple hidden
+           data-renamer-target="fileInput"
+           data-action="renamer#inputChanged">
     <div class="dz-inner">
       <div class="dz-icon">⬆️</div>
       <p><strong>Glissez vos fichiers ici</strong></p>
@@ -25,223 +32,21 @@
     </div>
   </div>
 
-  <div id="list" class="list" hidden></div>
-
-  <div class="actions">
-    <button id="renameBtn" class="btn primary" disabled>✨ Renommer</button>
-    <button id="downloadAllBtn" class="btn" hidden>⬇️ Tout télécharger (zip)</button>
-    <button id="clearBtn" class="btn ghost" hidden>Effacer</button>
+  <div class="progress" data-renamer-target="progress" hidden>
+    <div class="bar"><div class="fill" data-renamer-target="progressFill"></div></div>
+    <span class="count" data-renamer-target="progressCount"></span>
   </div>
 
-  <p id="error" class="error" hidden></p>
+  <div class="list" data-renamer-target="list" hidden></div>
+
+  <div class="actions">
+    <button class="btn primary" data-renamer-target="renameBtn"
+            data-action="renamer#rename" disabled>✨ Renommer</button>
+    <button class="btn" data-renamer-target="downloadAllBtn"
+            data-action="renamer#downloadAll" hidden>⬇️ Tout télécharger (zip)</button>
+    <button class="btn ghost" data-renamer-target="clearBtn"
+            data-action="renamer#clear" hidden>Effacer</button>
+  </div>
+
+  <p class="error" data-renamer-target="error" hidden></p>
 </main>
-
-<script>
-(() => {
-  const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
-  const dz = document.getElementById('dropzone');
-  const input = document.getElementById('fileInput');
-  const list = document.getElementById('list');
-  const renameBtn = document.getElementById('renameBtn');
-  const downloadAllBtn = document.getElementById('downloadAllBtn');
-  const clearBtn = document.getElementById('clearBtn');
-  const errorEl = document.getElementById('error');
-
-  let files = [];      // File objects queued before renaming
-  let results = [];    // { id, original, proposed } returned by the server
-
-  const showError = (msg) => { errorEl.textContent = msg; errorEl.hidden = !msg; };
-
-  function render() {
-    const hasFiles = files.length > 0;
-    const hasResults = results.length > 0;
-    list.hidden = !(hasFiles || hasResults);
-    renameBtn.disabled = !hasFiles;
-    downloadAllBtn.hidden = !hasResults;
-    clearBtn.hidden = !(hasFiles || hasResults);
-    list.innerHTML = '';
-
-    if (hasResults) {
-      results.forEach((r) => {
-        const ext = r.proposed.includes('.') ? r.proposed.slice(r.proposed.lastIndexOf('.')) : '';
-        const base = ext ? r.proposed.slice(0, -ext.length) : r.proposed;
-        const row = document.createElement('div');
-        row.className = 'row';
-        row.innerHTML = `
-          <div>
-            <div class="orig">Original&nbsp;: ${escapeHtml(r.original)}</div>
-            <div class="new">
-              <input class="name" type="text" value="${escapeHtml(base)}">
-              <span class="ext">${escapeHtml(ext)}</span>
-            </div>
-          </div>
-          <a class="dl" href="#">⬇️ Télécharger</a>`;
-        const nameInput = row.querySelector('input.name');
-        row.querySelector('.dl').addEventListener('click', (e) => {
-          e.preventDefault();
-          const name = (nameInput.value.trim() || base) + ext;
-          window.location = `download/${r.id}?name=${encodeURIComponent(name)}`;
-        });
-        list.appendChild(row);
-      });
-    } else {
-      files.forEach((f) => {
-        const row = document.createElement('div');
-        row.className = 'row';
-        row.innerHTML = `<div class="orig">${escapeHtml(f.name)}</div>
-          <span class="badge pending">en attente</span>`;
-        list.appendChild(row);
-      });
-    }
-  }
-
-  function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-  }
-
-  function addFiles(fileList) {
-    showError('');
-    results = [];
-    files = files.concat(Array.from(fileList));
-    render();
-  }
-
-  // --- Drag & drop ---
-  dz.addEventListener('click', () => input.click());
-  dz.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') input.click(); });
-  input.addEventListener('change', () => { addFiles(input.files); input.value = ''; });
-  ['dragenter', 'dragover'].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); }));
-  ['dragleave', 'drop'].forEach((ev) =>
-    dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); }));
-  dz.addEventListener('drop', (e) => { if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
-
-  // --- Rename ---
-  renameBtn.addEventListener('click', async () => {
-    if (!files.length) return;
-    showError('');
-    renameBtn.disabled = true;
-    const original = renameBtn.innerHTML;
-    renameBtn.innerHTML = '<span class="spinner"></span> Renommage en cours…';
-
-    const fd = new FormData();
-    files.forEach((f) => fd.append('files[]', f));
-
-    try {
-      const res = await fetch('rename', { method: 'POST', headers: { 'X-CSRF-Token': csrf }, body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erreur serveur.');
-      results = data.results;
-      files = [];
-      render();
-    } catch (err) {
-      showError(err.message);
-    } finally {
-      renameBtn.innerHTML = original;
-      renameBtn.disabled = files.length === 0;
-    }
-  });
-
-  // --- Download all (zip) ---
-  downloadAllBtn.addEventListener('click', () => {
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = 'download_all';
-    const token = document.createElement('input');
-    token.type = 'hidden'; token.name = 'authenticity_token'; token.value = csrf;
-    form.appendChild(token);
-    list.querySelectorAll('.row').forEach((row, i) => {
-      const r = results[i];
-      const inp = row.querySelector('input.name');
-      const ext = r.proposed.includes('.') ? r.proposed.slice(r.proposed.lastIndexOf('.')) : '';
-      const field = document.createElement('input');
-      field.type = 'hidden';
-      field.name = `names[${r.id}]`;
-      field.value = (inp.value.trim() || r.proposed.replace(ext, '')) + ext;
-      form.appendChild(field);
-    });
-    document.body.appendChild(form);
-    form.submit();
-    form.remove();
-  });
-
-  // --- Clear ---
-  clearBtn.addEventListener('click', () => { files = []; results = []; showError(''); render(); });
-
-  // --- Status check ---
-  // Only poll while LM Studio is unreachable; stop as soon as it connects so
-  // we don't spam its /v1/models log every few seconds.
-  const statusEl = document.getElementById('status');
-  let statusTimer = null;
-  async function poll() {
-    try {
-      const res = await fetch('status');
-      const d = await res.json();
-      statusEl.classList.toggle('ok', d.online);
-      statusEl.classList.toggle('ko', !d.online);
-      statusEl.querySelector('.label').innerHTML = d.online
-        ? `LM&nbsp;Studio connecté — modèle&nbsp;: <code>${escapeHtml(d.model)}</code>`
-        : 'LM&nbsp;Studio injoignable — démarre le serveur (onglet Developer)';
-      if (d.online && statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-    } catch (_) {}
-  }
-  // Start polling only if the server-rendered banner says it's offline.
-  if (!statusEl.classList.contains('ok')) statusTimer = setInterval(poll, 15000);
-})();
-</script>
-
-<style>
-  :root {
-    --bg: #0f172a; --panel: #1e293b; --panel-2: #273449;
-    --text: #e2e8f0; --muted: #94a3b8; --accent: #6366f1; --accent-2: #818cf8;
-    --ok: #22c55e; --ko: #ef4444; --line: #334155;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .wrap { max-width: 820px; margin: 0 auto; padding: 32px 20px 80px; }
-  .head h1 { margin: 0 0 4px; font-size: 1.7rem; }
-  .sub { margin: 0 0 14px; color: var(--muted); }
-  .status { display: inline-flex; align-items: center; gap: 8px; font-size: .85rem;
-    padding: 6px 12px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); }
-  .status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
-  .status.ok .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .status.ko .dot { background: var(--ko); }
-  .status code { color: var(--accent-2); }
-  .dropzone { margin-top: 22px; border: 2px dashed var(--line); border-radius: 16px;
-    background: var(--panel); padding: 46px 20px; text-align: center; cursor: pointer;
-    transition: border-color .15s, background .15s; }
-  .dropzone:hover, .dropzone:focus { border-color: var(--accent); outline: none; }
-  .dropzone.drag { border-color: var(--accent-2); background: var(--panel-2); }
-  .dz-icon { font-size: 2.2rem; }
-  .dropzone p { margin: 6px 0; }
-  .muted { color: var(--muted); font-size: .9rem; }
-  .list { margin-top: 22px; display: flex; flex-direction: column; gap: 10px; }
-  .row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-  .row .orig { color: var(--muted); font-size: .8rem; word-break: break-all; }
-  .row .new { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-  .row input.name { flex: 1; background: var(--panel-2); border: 1px solid var(--line);
-    color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: .95rem; }
-  .row input.name:focus { outline: none; border-color: var(--accent); }
-  .row .ext { color: var(--muted); font-size: .9rem; }
-  .badge { font-size: .72rem; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
-  .badge.pending { background: #3b3f00; color: #fde047; }
-  .badge.done { background: #052e16; color: #4ade80; }
-  .badge.err { background: #3f1d1d; color: #fca5a5; }
-  .spinner { width: 14px; height: 14px; border: 2px solid var(--line);
-    border-top-color: var(--accent-2); border-radius: 50%; display: inline-block;
-    animation: spin .7s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
-  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
-    padding: 11px 20px; border-radius: 10px; font-size: .95rem; cursor: pointer; transition: .15s; }
-  .btn:hover:not(:disabled) { border-color: var(--accent); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  .btn.primary:hover:not(:disabled) { background: var(--accent-2); }
-  .btn.ghost { background: transparent; }
-  .btn:disabled { opacity: .45; cursor: not-allowed; }
-  .dl { text-decoration: none; color: var(--accent-2); font-size: .85rem; white-space: nowrap; }
-  .error { margin-top: 16px; background: #3f1d1d; color: #fca5a5; padding: 12px 14px;
-    border-radius: 10px; border: 1px solid #7f1d1d; }
-</style>

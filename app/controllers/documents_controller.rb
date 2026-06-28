@@ -1,5 +1,4 @@
 require "securerandom"
-require "json"
 
 class DocumentsController < ApplicationController
   # Uploads come from a fetch() call with the CSRF token in the header.
@@ -16,69 +15,83 @@ class DocumentsController < ApplicationController
     render json: LmStudio.status
   end
 
-  # POST /rename — receives one or more files, returns proposed names.
+  # POST /rename — store a CHUNK of uploaded files. The first call (no batch_id)
+  # creates the batch; later calls append to it. Files are uploaded in small
+  # chunks so a single request never holds hundreds of multipart tempfiles open
+  # at once (which exhausts the process's file descriptors). No job is enqueued
+  # here — the client calls #start once every chunk has been uploaded.
   def rename
     files = Array(params[:files]).reject(&:blank?)
     return render(json: { error: "Aucun fichier reçu." }, status: :unprocessable_entity) if files.empty?
 
-    renamer = DocumentRenamer.new
-    results = []
-
-    files.each do |upload|
-      id = SecureRandom.uuid
-      original = sanitize_basename(upload.original_filename)
-      ext = File.extname(original)
-      stored = work_dir.join(id)
-
-      File.binwrite(stored, upload.read)
-
-      text = DocumentTextExtractor.extract(path: stored.to_s, original_name: original)
-      result = renamer.propose_name(original_name: original, text: text, file_path: stored.to_s)
-      proposed = "#{result.name}#{ext}"
-
-      manifest[id] = {
-        "original" => original, "ext" => ext, "proposed" => proposed,
-        "status" => result.status, "message" => result.message
-      }
-      results << {
-        id: id, original: original, proposed: proposed,
-        status: result.status, message: result.message
-      }
+    if params[:batch_id].present?
+      batch = current_batch
+      return render(json: { error: "Lot introuvable." }, status: :not_found) unless batch
+    else
+      batch = RenameBatch.create!(session_token: session_token)
     end
 
-    save_manifest
-    render json: { results: results }
-  rescue DocumentRenamer::LlmUnavailable => e
-    render json: { error: "LM Studio n'a pas répondu (serveur arrêté ou génération trop lente). Vérifie qu'il tourne (onglet Developer) puis réessaie.", detail: e.message },
-           status: :service_unavailable
+    files.each do |upload|
+      stored_id = SecureRandom.uuid
+      original = sanitize_basename(upload.original_filename)
+      File.binwrite(work_dir.join(stored_id), upload.read)
+
+      batch.items.create!(stored_id: stored_id, original: original, ext: File.extname(original))
+    end
+
+    render json: { batch_id: batch.id, items: batch.items.order(:created_at).map(&:as_payload) }
   end
 
-  # GET /download/:id?name=... — single renamed file.
+  # POST /rename/:batch_id/start — all files uploaded; enqueue one rename job per
+  # file. The LLM work happens in the background (see RenameFileJob); the UI then
+  # polls #rename_status. Idempotent: a second call won't re-enqueue.
+  def start
+    batch = current_batch
+    return head(:not_found) unless batch
+    return render(json: { error: "Aucun fichier à traiter." }, status: :unprocessable_entity) if batch.items.empty?
+
+    if batch.good_job_batch_id.blank?
+      gj_batch = GoodJob::Batch.enqueue(on_finish: RenameReportJob, rename_batch_id: batch.id) do
+        batch.items.where(state: "pending").each { |item| RenameFileJob.perform_later(item.id) }
+      end
+      batch.update!(good_job_batch_id: gj_batch.id)
+    end
+
+    render json: batch.progress.merge(items: batch.items.order(:created_at).map(&:as_payload))
+  end
+
+  # GET /rename/:batch_id/status — progress + per-file results for the UI.
+  def rename_status
+    batch = current_batch
+    return head(:not_found) unless batch
+
+    render json: batch.progress.merge(items: batch.items.order(:created_at).map(&:as_payload))
+  end
+
+  # GET /download/:id?name=... — single renamed file (id is a RenameItem id).
   def download
-    entry = manifest[params[:id]]
-    return head(:not_found) unless entry
+    item = owned_item(params[:id])
+    return head(:not_found) unless item && File.exist?(item.stored_path)
 
-    path = work_dir.join(params[:id])
-    return head(:not_found) unless File.exist?(path)
-
-    send_file path, filename: final_name(params[:name], entry), disposition: "attachment"
+    send_file item.stored_path, filename: final_name(params[:name], item), disposition: "attachment"
   end
 
-  # POST /download_all — zip of all renamed files. Body: { names: { id => name } }
+  # POST /download_all/:batch_id — zip of all renamed files in the batch.
+  # Body: { names: { item_id => name } }
   def download_all
-    names = params.fetch(:names, {}).to_unsafe_h
-    return head(:not_found) if manifest.empty?
+    batch = current_batch
+    return head(:not_found) unless batch
 
+    names = params.fetch(:names, {}).to_unsafe_h
     require "zip"
     buffer = Zip::OutputStream.write_buffer do |zip|
       used = Hash.new(0)
-      manifest.each do |id, entry|
-        path = work_dir.join(id)
-        next unless File.exist?(path)
+      batch.items.order(:created_at).each do |item|
+        next unless File.exist?(item.stored_path)
 
-        name = dedupe(final_name(names[id], entry), used)
+        name = dedupe(final_name(names[item.id], item), used)
         zip.put_next_entry(name)
-        zip.write(File.binread(path))
+        zip.write(File.binread(item.stored_path))
       end
     end
     buffer.rewind
@@ -88,13 +101,22 @@ class DocumentsController < ApplicationController
 
   private
 
-  def final_name(requested, entry)
+  def current_batch
+    RenameBatch.find_by(id: params[:batch_id], session_token: session_token)
+  end
+
+  # Look up an item but only within the current session's batches.
+  def owned_item(id)
+    RenameItem.joins(:rename_batch)
+              .find_by(id: id, rename_batches: { session_token: session_token })
+  end
+
+  def final_name(requested, item)
     candidate = requested.to_s.strip
-    candidate = entry["proposed"] if candidate.empty?
-    base = File.basename(candidate, ".*")
-    base = sanitize_basename(base)
+    candidate = item.proposed.to_s if candidate.empty?
+    base = sanitize_basename(File.basename(candidate, ".*"))
     base = "document" if base.empty?
-    "#{base}#{entry['ext']}"
+    "#{base}#{item.ext}"
   end
 
   # Avoid clobbering when two files end up with the same name in the zip.
@@ -119,17 +141,5 @@ class DocumentsController < ApplicationController
     @work_dir ||= Rails.root.join("tmp", "doc_renamer", session_token).tap do |dir|
       FileUtils.mkdir_p(dir)
     end
-  end
-
-  def manifest_path
-    work_dir.join("manifest.json")
-  end
-
-  def manifest
-    @manifest ||= File.exist?(manifest_path) ? JSON.parse(File.read(manifest_path)) : {}
-  end
-
-  def save_manifest
-    File.write(manifest_path, JSON.pretty_generate(manifest))
   end
 end
