@@ -120,13 +120,20 @@ class DocumentsController < ApplicationController
   end
 
   # Avoid clobbering when two files end up with the same name in the zip.
+  # Suffixes collisions with _1, _2, … and re-checks the suffixed name too, so an
+  # auto-generated name can't clash with one the user typed (e.g. two "facture"
+  # plus an explicit "facture_1" → facture, facture_1, facture_1_1).
   def dedupe(name, used)
     ext = File.extname(name)
     base = File.basename(name, ".*")
-    used[name] += 1
-    return name if used[name] == 1
-
-    "#{base}_#{used[name] - 1}#{ext}"
+    candidate = name
+    n = 0
+    while used[candidate].positive?
+      n += 1
+      candidate = "#{base}_#{n}#{ext}"
+    end
+    used[candidate] += 1
+    candidate
   end
 
   def sanitize_basename(name)
