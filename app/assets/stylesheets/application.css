@@ -62,7 +62,10 @@ body { margin: 0; background: var(--bg); color: var(--text);
   border-top-color: var(--accent-2); border-radius: 50%; display: inline-block;
   animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
+/* Sticky so the actions stay reachable when the list is hundreds of rows long. */
+.actions { position: sticky; bottom: 0; z-index: 10; margin-top: 24px;
+  padding: 16px 0; display: flex; gap: 12px; flex-wrap: wrap;
+  background: var(--bg); border-top: 1px solid var(--line); }
 .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
   padding: 11px 20px; border-radius: 10px; font-size: .95rem; cursor: pointer; transition: .15s; }
 .btn:hover:not(:disabled) { border-color: var(--accent); }

@@ -180,20 +180,24 @@ export default class extends Controller {
     const hasItems = this.items.length > 0
     const processing = this.batchId && !this.finished && !this.uploading
     const showProgress = this.uploading || processing
+    // Per-file rows are only useful once processing starts. While importing
+    // (files queued, or uploading hundreds of them) they're just noise — the
+    // count on the button + the progress bar are enough.
+    const showList = hasItems && !this.uploading
 
-    this.listTarget.hidden = !(hasFiles || hasItems)
+    this.listTarget.hidden = !showList
     this.renameBtnTarget.disabled = !hasFiles || this.uploading || processing
     this.renameBtnTarget.innerHTML =
       this.uploading ? '<span class="spinner"></span> Envoi…'
         : processing ? '<span class="spinner"></span> Renommage en cours…'
-          : "✨ Renommer"
+          : hasFiles ? `✨ Renommer (${this.files.length})` : "✨ Renommer"
     this.clearBtnTarget.hidden = !(hasFiles || hasItems)
 
     // Download all only once the batch is finished.
     this.downloadAllBtnTarget.hidden = !(this.batchId && this.finished)
 
     this.renderProgress(showProgress)
-    this.renderList(hasItems)
+    this.renderList(showList)
   }
 
   renderProgress(active) {
@@ -215,20 +219,11 @@ export default class extends Controller {
     this.progressCountTarget.textContent = label
   }
 
-  renderList(hasItems) {
+  renderList(show) {
     this.listTarget.innerHTML = ""
+    if (!show) return
 
-    if (hasItems) {
-      this.items.forEach((item) => this.listTarget.appendChild(this.itemRow(item)))
-    } else {
-      this.files.forEach((f) => {
-        const row = document.createElement("div")
-        row.className = "row"
-        row.innerHTML = `<div class="orig">${this.escapeHtml(f.name)}</div>
-          <span class="badge pending">en attente</span>`
-        this.listTarget.appendChild(row)
-      })
-    }
+    this.items.forEach((item) => this.listTarget.appendChild(this.itemRow(item)))
   }
 
   itemRow(item) {
